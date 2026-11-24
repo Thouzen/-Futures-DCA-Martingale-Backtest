@@ -512,17 +512,65 @@
       return ema;
     },
 
-    getStepMargin(params, stepIndex) {
+    getStepMargin(params, stepIndex, currentTotalMargin = 0) {
+      if (stepIndex === 0) return params.baseMargin;
       if (params.dcaMode === 'linear') {
         return params.baseMargin + stepIndex * params.linearStep;
       }
-      return params.baseMargin * Math.pow(params.multiplier, stepIndex);
+      // Kümülatif Martingale: her ekleme o ana kadar biriken toplam teminatın çarpan katıdır
+      return currentTotalMargin * params.multiplier;
+    },
+
+    buildMarkers(trades, showLabels = false, trendConfirmPct = 1.0) {
+      const markers = [];
+      for (const t of trades) {
+        const addSuffix = t.addCount > 0 ? ` (+${t.addCount})` : '';
+        markers.push({
+          time: t.entryTime,
+          position: 'belowBar',
+          color: '#29B6F6',
+          shape: 'arrowUp',
+          text: showLabels ? `#${t.id} AL $${t.totalMargin.toFixed(2)}${addSuffix}` : '',
+        });
+
+        if (t.trendConfirmed && t.trendConfirmTime) {
+          markers.push({
+            time: t.trendConfirmTime,
+            position: 'aboveBar',
+            color: '#00E5FF',
+            shape: 'square',
+            text: showLabels ? `◆ #${t.id} +${trendConfirmPct}%` : '',
+          });
+        }
+
+        if (t.status === 'CLOSED' && t.exitTime) {
+          markers.push({
+            time: t.exitTime,
+            position: 'aboveBar',
+            color: t.netPnl >= 0 ? '#00E676' : '#FF5252',
+            shape: 'arrowDown',
+            text: showLabels ? `#${t.id} SAT ${fmtSignedUsd(t.netPnl)}` : '',
+          });
+        } else if (t.status === 'LIQUIDATED' && t.exitTime) {
+          markers.push({
+            time: t.exitTime,
+            position: 'aboveBar',
+            color: '#FF5252',
+            shape: 'circle',
+            text: showLabels ? `#${t.id} LİKİDE ${fmtSignedUsd(t.netPnl)}` : '',
+          });
+        }
+      }
+      markers.sort((a, b) => a.time - b.time);
+      return markers;
     },
 
     run(candles, params) {
       const ema = this.calculateEMA(candles, params.emaPeriod);
       const feeRate = params.feeRatePct / 100;
       const stepDrop = params.stepDropPct / 100;
+      const trendConfirmPct = params.trendConfirmPct ?? 1.0;
+      const trendConfirmFactor = 1 + trendConfirmPct / 100;
       const leverage = params.leverage;
 
       let walletBalance = params.initialBalance;
@@ -543,6 +591,48 @@
       const nextAddSeries = [];
       const equitySeries = [];
 
+      const closePositionAtEma = (c, exitPrice, exitReason) => {
+        const grossPnl = pos.qty * (exitPrice - pos.avgEntryPrice);
+        const exitNotional = pos.qty * exitPrice;
+        const exitFee = exitNotional * feeRate;
+
+        pos.fees += exitFee;
+        totalFeesPaid += exitFee;
+        walletBalance += grossPnl - exitFee;
+
+        const netPnl = walletBalance - pos.preTradeBalance;
+        const netPnlPct = pos.totalMargin > 0 ? (netPnl / pos.totalMargin) * 100 : 0;
+
+        trades.push({
+          id: pos.id,
+          status: 'CLOSED',
+          exitReason,
+          trendConfirmed: pos.trendConfirmed,
+          trendConfirmTime: pos.trendConfirmTime,
+          entryTime: pos.entryTime,
+          exitTime: c.time,
+          initialEntryPrice: pos.initialEntryPrice,
+          addCount: pos.addCount,
+          adds: pos.adds,
+          avgEntryPrice: pos.avgEntryPrice,
+          totalMargin: pos.totalMargin,
+          totalNotional: pos.totalNotional,
+          exitPrice,
+          fees: pos.fees,
+          netPnl,
+          netPnlPct,
+          endBalance: walletBalance,
+        });
+
+        avgEntrySeries.push({ time: c.time, value: pos.avgEntryPrice });
+        nextAddSeries.push({ time: c.time });
+        pos = null;
+
+        if (walletBalance > peakEquity) peakEquity = walletBalance;
+        if (walletBalance < minEquity) minEquity = walletBalance;
+        equitySeries.push({ time: c.time, value: walletBalance });
+      };
+
       for (let i = 0; i < candles.length; i++) {
         const c = candles[i];
         const emaVal = ema[i];
@@ -559,11 +649,25 @@
           continue;
         }
 
-        // 1) AÇIK POZİSYON VARSA: EKLEME -> LİKİDASYON -> EMA ÇIKIŞ
+        // 1) AÇIK POZİSYON VARSA: ÇİFT MODLU ÇIKIŞ + EKLEME + LİKİDASYON
         if (pos) {
+          // Durum A (Eklemesiz Trend Takibi): Trend onayı daha önceki mumda alındıysa
+          // fiyat tekrar EMA çizgisine geri çarptığında (low <= ema) pozisyonu EMA'dan kapat.
+          if (
+            pos.addCount === 0 &&
+            pos.trendConfirmed &&
+            emaVal !== null &&
+            c.low <= emaVal &&
+            (!params.onlyExitAboveAvg || emaVal > pos.avgEntryPrice)
+          ) {
+            closePositionAtEma(c, emaVal, 'TREND_EMA');
+            continue;
+          }
+
           // 1a) Ekleme tetikleme kontrolü (mum içinde low <= nextAddPrice)
+          // Not: Durum A'da trend onayı alınmadan fiyat -%1.5 düşerse ekleme yapılır ve Durum B'ye geçilir.
           while (pos.addCount < params.maxAdds && c.low <= pos.nextAddPrice) {
-            const nextMargin = this.getStepMargin(params, pos.addCount + 1);
+            const nextMargin = this.getStepMargin(params, pos.addCount + 1, pos.totalMargin);
             const nextNotional = nextMargin * leverage;
             const addFee = nextNotional * feeRate;
             const freeBalance = walletBalance - pos.totalMargin;
@@ -626,6 +730,9 @@
             const closedTrade = {
               id: pos.id,
               status: 'LIQUIDATED',
+              exitReason: 'LIQUIDATED',
+              trendConfirmed: pos.trendConfirmed,
+              trendConfirmTime: pos.trendConfirmTime,
               entryTime: pos.entryTime,
               exitTime: c.time,
               initialEntryPrice: pos.initialEntryPrice,
@@ -653,51 +760,25 @@
             continue;
           }
 
-          // 1c) EMA Çıkış Kontrolü (mumun high değeri EMA'ya değdiğinde)
-          const canExit =
-            emaVal !== null &&
-            c.high >= emaVal &&
-            (!params.onlyExitAboveAvg || emaVal > pos.avgEntryPrice);
+          // 1c) Çift Modlu Çıkış / Trend Onayı Kontrolü
+          if (pos.addCount === 0) {
+            // Durum A: Hiç ekleme yapılmadı -> EMA temasında SATMA, EMA * (1 + trendConfirm%) üstüne çıkınca trendi onayla
+            if (!pos.trendConfirmed && emaVal !== null && c.high >= emaVal * trendConfirmFactor) {
+              pos.trendConfirmed = true;
+              pos.trendConfirmTime = c.time;
+              pos.trendConfirmPrice = emaVal * trendConfirmFactor;
+            }
+          } else {
+            // Durum B: En az 1 ekleme yapıldı -> Maliyet kurtarma modu, EMA'ya değdiği anda doğrudan kapat
+            const canExit =
+              emaVal !== null &&
+              c.high >= emaVal &&
+              (!params.onlyExitAboveAvg || emaVal > pos.avgEntryPrice);
 
-          if (canExit) {
-            const exitPrice = emaVal;
-            const grossPnl = pos.qty * (exitPrice - pos.avgEntryPrice);
-            const exitNotional = pos.qty * exitPrice;
-            const exitFee = exitNotional * feeRate;
-
-            pos.fees += exitFee;
-            totalFeesPaid += exitFee;
-            walletBalance += grossPnl - exitFee;
-
-            const netPnl = walletBalance - pos.preTradeBalance;
-            const netPnlPct = pos.totalMargin > 0 ? (netPnl / pos.totalMargin) * 100 : 0;
-
-            trades.push({
-              id: pos.id,
-              status: 'CLOSED',
-              entryTime: pos.entryTime,
-              exitTime: c.time,
-              initialEntryPrice: pos.initialEntryPrice,
-              addCount: pos.addCount,
-              adds: pos.adds,
-              avgEntryPrice: pos.avgEntryPrice,
-              totalMargin: pos.totalMargin,
-              totalNotional: pos.totalNotional,
-              exitPrice,
-              fees: pos.fees,
-              netPnl,
-              netPnlPct,
-              endBalance: walletBalance,
-            });
-
-            avgEntrySeries.push({ time: c.time, value: pos.avgEntryPrice });
-            nextAddSeries.push({ time: c.time });
-            pos = null;
-
-            if (walletBalance > peakEquity) peakEquity = walletBalance;
-            if (walletBalance < minEquity) minEquity = walletBalance;
-            equitySeries.push({ time: c.time, value: walletBalance });
-            continue;
+            if (canExit) {
+              closePositionAtEma(c, emaVal, 'DCA_EMA');
+              continue;
+            }
           }
 
           // Pozisyon hala açık: çizgileri ve anlık özsermayeyi kaydet
@@ -744,6 +825,9 @@
               adds: [],
               nextAddPrice: entryPrice * (1 - stepDrop),
               preTradeBalance,
+              trendConfirmed: false,
+              trendConfirmTime: null,
+              trendConfirmPrice: null,
             };
 
             if (pos.totalMargin > maxMarginUsed) {
@@ -778,6 +862,9 @@
         trades.push({
           id: pos.id,
           status: 'OPEN',
+          exitReason: 'OPEN',
+          trendConfirmed: pos.trendConfirmed,
+          trendConfirmTime: pos.trendConfirmTime,
           entryTime: pos.entryTime,
           exitTime: null,
           initialEntryPrice: pos.initialEntryPrice,
@@ -794,37 +881,8 @@
         });
       }
 
-      // Birleşik Grafik Etiketleri (Markers)
-      const markers = [];
-      for (const t of trades) {
-        const addSuffix = t.addCount > 0 ? ` (+${t.addCount} Ekleme)` : '';
-        markers.push({
-          time: t.entryTime,
-          position: 'belowBar',
-          color: '#00E676',
-          shape: 'arrowUp',
-          text: `#${t.id} AL $${t.totalMargin.toFixed(2)}${addSuffix}`,
-        });
-
-        if (t.status === 'CLOSED' && t.exitTime) {
-          markers.push({
-            time: t.exitTime,
-            position: 'aboveBar',
-            color: t.netPnl >= 0 ? '#00E676' : '#FF5252',
-            shape: 'arrowDown',
-            text: `#${t.id} SAT ${fmtSignedUsd(t.netPnl)}`,
-          });
-        } else if (t.status === 'LIQUIDATED' && t.exitTime) {
-          markers.push({
-            time: t.exitTime,
-            position: 'aboveBar',
-            color: '#FF5252',
-            shape: 'circle',
-            text: `#${t.id} LİKİDE ${fmtSignedUsd(t.netPnl)}`,
-          });
-        }
-      }
-      markers.sort((a, b) => a.time - b.time);
+      // Varsayılan sadeleştirilmiş (metinsiz) işaretçiler
+      const markers = this.buildMarkers(trades, false, trendConfirmPct);
 
       // KPI Hesaplamaları
       const closedTrades = trades.filter((t) => t.status === 'CLOSED' || t.status === 'LIQUIDATED');
@@ -839,6 +897,7 @@
       return {
         trades,
         markers,
+        trendConfirmPct,
         emaSeries,
         avgEntrySeries,
         nextAddSeries,
@@ -884,7 +943,7 @@
           currentPrice = currentPrice * (1 - stepDrop);
         }
         const dropFromStartPct = ((currentPrice - refPrice) / refPrice) * 100;
-        const stepMargin = this.getStepMargin(params, step);
+        const stepMargin = this.getStepMargin(params, step, cumMargin);
         const stepNotional = stepMargin * leverage;
         const stepFee = stepNotional * feeRate;
         const stepQty = stepNotional / currentPrice;
@@ -946,7 +1005,91 @@
 
     lastCandles: [],
     lastResult: null,
+    showMarkerLabels: false,
     hasLwc: typeof window.LightweightCharts !== 'undefined',
+
+    setShowMarkerLabels(show) {
+      this.showMarkerLabels = Boolean(show);
+      if (this.hasLwc && this.candleSeries && this.lastResult) {
+        const markers = BacktestEngine.buildMarkers(
+          this.lastResult.trades,
+          this.showMarkerLabels,
+          this.lastResult.trendConfirmPct ?? 1.0
+        );
+        this.candleSeries.setMarkers(markers);
+      }
+    },
+
+    findTradeEventAtTime(timeSec) {
+      if (!this.lastResult || !this.lastResult.trades.length) return null;
+      const trades = this.lastResult.trades;
+      // 1) Öncelikli: tam olay mumları (Giriş, Trend Onayı, Ekleme, Çıkış/Likidasyon)
+      for (const t of trades) {
+        if (t.exitTime === timeSec) {
+          return { trade: t, eventType: t.status === 'LIQUIDATED' ? 'LIQUIDATED' : 'EXIT' };
+        }
+        if (t.trendConfirmed && t.trendConfirmTime === timeSec) {
+          return { trade: t, eventType: 'TREND_CONFIRM' };
+        }
+        if (t.entryTime === timeSec) {
+          return { trade: t, eventType: 'ENTRY' };
+        }
+        if (t.adds && t.adds.some((a) => a.time === timeSec)) {
+          return { trade: t, eventType: 'ADD' };
+        }
+      }
+      // 2) Aktif işlem aralığı içindeki herhangi bir mum
+      for (const t of trades) {
+        const endT = t.exitTime ?? Infinity;
+        if (timeSec >= t.entryTime && timeSec <= endT) {
+          return { trade: t, eventType: 'ACTIVE' };
+        }
+      }
+      return null;
+    },
+
+    updateHoverTradeBar(timeSec) {
+      const bar = document.getElementById('hoverTradeInfo');
+      if (!bar) return;
+      if (!timeSec) {
+        bar.classList.add('hidden');
+        return;
+      }
+      const match = this.findTradeEventAtTime(timeSec);
+      if (!match) {
+        bar.classList.add('hidden');
+        return;
+      }
+
+      const { trade: t, eventType } = match;
+      const trendPct = this.lastResult?.trendConfirmPct ?? 1.0;
+      let badgeHtml = '';
+      if (eventType === 'ENTRY') {
+        badgeHtml = '<span class="hover-badge hover-badge-al">AL</span>';
+      } else if (eventType === 'TREND_CONFIRM') {
+        badgeHtml = `<span class="hover-badge hover-badge-trend">◆ +${trendPct}% TREND ONAYI</span>`;
+      } else if (eventType === 'ADD') {
+        badgeHtml = '<span class="hover-badge hover-badge-al">EKLEME</span>';
+      } else if (eventType === 'EXIT') {
+        badgeHtml = `<span class="hover-badge ${t.netPnl >= 0 ? 'hover-badge-sat' : 'hover-badge-loss'}">SAT</span>`;
+      } else if (eventType === 'LIQUIDATED') {
+        badgeHtml = '<span class="hover-badge hover-badge-loss">LİKİDE</span>';
+      } else {
+        badgeHtml = t.trendConfirmed
+          ? '<span class="hover-badge hover-badge-trend">TREND TAKİBİ</span>'
+          : '<span class="hover-badge hover-badge-al">AÇIK İŞLEM</span>';
+      }
+
+      const pnlClass = t.netPnl > 0 ? 'positive' : t.netPnl < 0 ? 'negative' : '';
+      bar.innerHTML = `
+        ${badgeHtml}
+        <span>İşlem <b class="mono">#${t.id}</b></span>
+        <span>Teminat: <b class="mono">${fmtUsd(t.totalMargin)}</b></span>
+        <span>Ekleme: <b class="mono">+${t.addCount}</b></span>
+        <span>Net K/Z: <b class="mono ${pnlClass}">${fmtSignedUsd(t.netPnl)} (${fmtSignedPct(t.netPnlPct)})</b></span>
+      `;
+      bar.classList.remove('hidden');
+    },
 
     initMainChart(container) {
       this.hasLwc = typeof window.LightweightCharts !== 'undefined';
@@ -1028,13 +1171,16 @@
         title: 'Sonraki Ekleme',
       });
 
-      // Crosshair Legend senkronizasyonu
+      // Crosshair Legend & Sol Üst İşlem Bilgi Barı senkronizasyonu
       this.mainChart.subscribeCrosshairMove((param) => {
         const ohlcEl = document.getElementById('legendOhlc');
         const emaEl = document.getElementById('legendEmaVal');
         const avgEl = document.getElementById('legendAvgVal');
         const nextEl = document.getElementById('legendNextVal');
-        if (!param || !param.time) return;
+        if (!param || !param.time) {
+          this.updateHoverTradeBar(null);
+          return;
+        }
 
         const cData = param.seriesData.get(this.candleSeries);
         const eData = param.seriesData.get(this.emaSeries);
@@ -1047,6 +1193,8 @@
         if (emaEl) emaEl.textContent = eData && eData.value !== undefined ? fmtPrice(eData.value) : '—';
         if (avgEl) avgEl.textContent = aData && aData.value !== undefined ? fmtPrice(aData.value) : '—';
         if (nextEl) nextEl.textContent = nData && nData.value !== undefined ? fmtPrice(nData.value) : '—';
+
+        this.updateHoverTradeBar(param.time);
       });
 
       const ro = new ResizeObserver(() => {
@@ -1153,7 +1301,10 @@
       this.emaSeries.setData(result.emaSeries);
       this.avgSeries.setData(result.avgEntrySeries);
       this.nextAddSeries.setData(result.nextAddSeries);
-      this.candleSeries.setMarkers(result.markers);
+      this.candleSeries.setMarkers(
+        BacktestEngine.buildMarkers(result.trades, this.showMarkerLabels, result.trendConfirmPct ?? 1.0)
+      );
+      this.updateHoverTradeBar(null);
       this.mainChart.timeScale().fitContent();
 
       // Equity Curve
@@ -1295,7 +1446,7 @@
         'datePresetSelect', 'customDateWrap', 'startDateInput', 'endDateInput', 'forceRefreshCheck',
         'initialBalanceInput', 'baseMarginInput', 'leverageInput', 'feeRateInput',
         'emaPeriodInput', 'stepDropInput', 'dcaModeSelect', 'multiplierGroup', 'multiplierInput',
-        'linearStepGroup', 'linearStepInput', 'maxAddsInput',
+        'linearStepGroup', 'linearStepInput', 'maxAddsInput', 'trendConfirmInput',
         'toggleExitAboveAvg', 'toggleCrossLiq',
         'fetchProgressWrap', 'fetchProgressText', 'fetchProgressPct', 'fetchProgressFill',
         'btnRunSimulation', 'fileUploadInput', 'btnExportCsv',
@@ -1303,8 +1454,8 @@
         'kpiWinRate', 'kpiWinRateSub', 'kpiTotalTrades', 'kpiTotalTradesSub',
         'kpiMaxDd', 'kpiMaxDdSub', 'kpiMaxMargin', 'kpiMaxMarginSub',
         'chartSymbolLabel', 'chartTfLabel', 'chartSourceBadge', 'chartCandleCount',
-        'selectedTradePill', 'btnResetZoom', 'liquidationAlertBar', 'liqAlertText',
-        'mainChartContainer', 'equityChartContainer',
+        'selectedTradePill', 'btnToggleLabels', 'btnResetZoom', 'liquidationAlertBar', 'liqAlertText',
+        'hoverTradeInfo', 'mainChartContainer', 'equityChartContainer',
         'tabTradesCount', 'tabHintText', 'thMarginVol', 'thEmaExit', 'tradesTableBody',
         'eqStartVal', 'eqPeakVal', 'eqLowVal', 'eqEndVal', 'eqRoiVal',
         'ladderRefPriceInput', 'ladderSummaryBadge', 'ladderTableBody',
@@ -1363,6 +1514,7 @@
         multiplier: Math.max(1, parseFloat(this.el.multiplierInput.value) || 2.0),
         linearStep: Math.max(0.01, parseFloat(this.el.linearStepInput.value) || 0.5),
         maxAdds: Math.min(20, Math.max(0, parseInt(this.el.maxAddsInput.value, 10) || 7)),
+        trendConfirmPct: Math.max(0.1, parseFloat(this.el.trendConfirmInput.value) || 1.0),
         onlyExitAboveAvg: this.el.toggleExitAboveAvg.checked,
         crossLiquidation: this.el.toggleCrossLiq.checked,
       };
@@ -1385,6 +1537,7 @@
           multiplierInput: this.el.multiplierInput.value,
           linearStepInput: this.el.linearStepInput.value,
           maxAddsInput: this.el.maxAddsInput.value,
+          trendConfirmInput: this.el.trendConfirmInput.value,
           toggleExitAboveAvg: this.el.toggleExitAboveAvg.checked,
           toggleCrossLiq: this.el.toggleCrossLiq.checked,
         };
@@ -1447,7 +1600,7 @@
         });
       }
 
-      ['timeframeSelect', 'customSymbolInput', 'toggleExitAboveAvg', 'toggleCrossLiq'].forEach((id) => {
+      ['timeframeSelect', 'customSymbolInput', 'trendConfirmInput', 'toggleExitAboveAvg', 'toggleCrossLiq'].forEach((id) => {
         this.el[id].addEventListener('change', () => {
           this.saveSettings();
           if (id === 'timeframeSelect' || id === 'customSymbolInput') {
@@ -1458,6 +1611,15 @@
 
       this.el.btnRunSimulation.addEventListener('click', () => this.runSimulation());
       this.el.btnExportCsv.addEventListener('click', () => this.exportTradesCsv());
+
+      this.el.btnToggleLabels.addEventListener('click', () => {
+        const nextShow = !ChartManager.showMarkerLabels;
+        ChartManager.setShowMarkerLabels(nextShow);
+        this.el.btnToggleLabels.classList.toggle('active', nextShow);
+        this.el.btnToggleLabels.textContent = nextShow
+          ? 'Etiket Metinlerini Gizle'
+          : 'Etiket Metinlerini Göster';
+      });
 
       this.el.btnResetZoom.addEventListener('click', () => {
         this.state.selectedTradeId = null;

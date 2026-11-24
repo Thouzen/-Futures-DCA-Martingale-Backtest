@@ -687,7 +687,8 @@ select.input-control {
   transition: all 0.15s ease;
 }
 
-.btn-chip:hover {
+.btn-chip:hover,
+.btn-chip.active {
   background: var(--bg-hover);
   border-color: var(--profit);
   color: var(--profit);
@@ -704,6 +705,74 @@ select.input-control {
 
 .liq-alert strong {
   color: var(--loss);
+}
+
+.chart-stage {
+  flex: 1;
+  width: 100%;
+  min-height: 0;
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  background: #000000;
+}
+
+.hover-trade-bar {
+  position: absolute;
+  top: 10px;
+  left: 12px;
+  z-index: 12;
+  pointer-events: none;
+  display: inline-flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+  padding: 6px 12px;
+  border-radius: var(--radius-sm);
+  background: rgba(10, 13, 18, 0.9);
+  border: 1px solid var(--border-strong);
+  backdrop-filter: blur(6px);
+  font-size: 12.5px;
+  color: var(--text-secondary);
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.65);
+}
+
+.hover-trade-bar b {
+  color: var(--text-primary);
+  font-weight: 600;
+}
+
+.hover-badge {
+  display: inline-block;
+  padding: 2px 7px;
+  border-radius: 4px;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+}
+
+.hover-badge-al {
+  background: rgba(41, 182, 246, 0.18);
+  color: #29B6F6;
+  border: 1px solid rgba(41, 182, 246, 0.45);
+}
+
+.hover-badge-trend {
+  background: rgba(0, 229, 255, 0.16);
+  color: #00E5FF;
+  border: 1px solid rgba(0, 229, 255, 0.45);
+}
+
+.hover-badge-sat {
+  background: var(--profit-dim);
+  color: var(--profit);
+  border: 1px solid rgba(0, 230, 118, 0.4);
+}
+
+.hover-badge-loss {
+  background: var(--loss-dim);
+  color: var(--loss);
+  border: 1px solid rgba(255, 82, 82, 0.45);
 }
 
 .chart-canvas-host {
