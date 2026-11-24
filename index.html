@@ -171,10 +171,36 @@
           </div>
         </section>
 
-        <!-- BÖLÜM 4: KRİTİK KORUMA ANAHTARLARI -->
+        <!-- BÖLÜM 4: KURTARMA & KASA KALKANI (3. EKLEME SONRASI) -->
+        <section class="panel-section shield-section">
+          <div class="section-title">
+            <span>4. Kurtarma &amp; Kasa Kalkanı (3+ Ekleme)</span>
+          </div>
+
+          <div class="form-row-2">
+            <div class="form-group">
+              <label for="recoveryTpInput">3. Ekleme Kâr Hedefi (%)</label>
+              <input id="recoveryTpInput" type="number" step="0.05" min="0.05" max="20" value="0.40" class="input-control mono" />
+            </div>
+            <div class="form-group">
+              <label for="maxTradeLossInput">Maks. Zarar Limiti ($)</label>
+              <input id="maxTradeLossInput" type="number" step="1" min="1" max="10000" value="35" class="input-control mono" />
+            </div>
+          </div>
+
+          <div class="form-group">
+            <label for="postThirdAddSelect">3. Ekleme Sonrası Davranış</label>
+            <select id="postThirdAddSelect" class="input-control">
+              <option value="stop" selected>Yeni Eklemeyi Durdur ($13.50 Sabit)</option>
+              <option value="defense">Son 1 Savunma Eklemesi (+$13.50 / -%2.5)</option>
+            </select>
+          </div>
+        </section>
+
+        <!-- BÖLÜM 5: KRİTİK KORUMA ANAHTARLARI -->
         <section class="panel-section">
           <div class="section-title">
-            <span>4. Kritik Risk Korumaları</span>
+            <span>5. Kritik Risk Korumaları</span>
           </div>
 
           <label class="toggle-row" for="toggleExitAboveAvg">
@@ -298,7 +324,9 @@
             <span class="legend-item mono" id="legendOhlc">O: — &nbsp; H: — &nbsp; L: — &nbsp; C: —</span>
             <span class="legend-item"><i class="dot dot-ema"></i><span id="legendEmaLabel">EMA 50:</span> <b id="legendEmaVal" class="mono">—</b></span>
             <span class="legend-item"><i class="dot dot-avg"></i>Ort. Giriş: <b id="legendAvgVal" class="mono">—</b></span>
-            <span class="legend-item"><i class="dot dot-add"></i>Sonraki Ekleme: <b id="legendNextVal" class="mono">—</b></span>
+            <span class="legend-item"><i class="dot dot-add"></i>Ekleme: <b id="legendNextVal" class="mono">—</b></span>
+            <span class="legend-item"><i class="dot dot-tp"></i>Kurtarma TP: <b id="legendRecoveryTpVal" class="mono">—</b></span>
+            <span class="legend-item"><i class="dot dot-sl"></i>Kalkan SL: <b id="legendShieldSlVal" class="mono">—</b></span>
           </div>
 
           <div class="chart-actions">
@@ -345,20 +373,21 @@
               <thead>
                 <tr>
                   <th>İşlem No</th>
+                  <th>Çıkış Sebebi / Durum</th>
                   <th>Giriş Zamanı</th>
                   <th>Çıkış Zamanı</th>
                   <th class="num">İlk Alım Fiyatı</th>
                   <th class="num">Ekleme Sayısı (+X)</th>
                   <th class="num">Ort. Giriş Fiyatı</th>
                   <th class="num" id="thMarginVol">Toplam Teminat / Hacim (10x)</th>
-                  <th class="num" id="thEmaExit">EMA 50 Çıkış</th>
+                  <th class="num" id="thEmaExit">Çıkış Fiyatı</th>
                   <th class="num">Net K/Z ($ ve %)</th>
                   <th class="num">İşlem Sonu Kasa</th>
                 </tr>
               </thead>
               <tbody id="tradesTableBody">
                 <tr class="empty-row">
-                  <td colspan="10">Simülasyonu çalıştırdığınızda birleşik işlem döngüleri burada listelenecektir.</td>
+                  <td colspan="11">Simülasyonu çalıştırdığınızda birleşik işlem döngüleri burada listelenecektir.</td>
                 </tr>
               </tbody>
             </table>

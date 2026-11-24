@@ -655,6 +655,14 @@ select.input-control {
   background: transparent;
   border: 2px dashed var(--loss);
 }
+.dot-tp {
+  background: transparent;
+  border: 2px dashed #00E5FF;
+}
+.dot-sl {
+  background: transparent;
+  border: 2px solid #FF5252;
+}
 
 .chart-actions {
   display: flex;
@@ -990,6 +998,26 @@ select.input-control {
   background: var(--ema-dim);
   color: var(--ema);
   border: 1px solid rgba(255, 152, 0, 0.35);
+}
+
+.tag-trend {
+  background: rgba(0, 229, 255, 0.14);
+  color: #00E5FF;
+  border: 1px solid rgba(0, 229, 255, 0.38);
+}
+
+.tag-tp {
+  background: rgba(29, 233, 182, 0.16);
+  color: #1DE9B6;
+  border: 1px solid rgba(29, 233, 182, 0.42);
+}
+
+.shield-section {
+  border-color: rgba(0, 229, 255, 0.25);
+}
+
+.shield-section .section-title {
+  color: #00E5FF;
 }
 
 /* ==================== SEKME 2: KASA BÜYÜME EĞRİSİ ==================== */

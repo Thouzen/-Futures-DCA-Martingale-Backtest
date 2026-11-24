@@ -512,8 +512,24 @@
       return ema;
     },
 
+    getEffectiveMaxAdds(params) {
+      const brakeCap = params.postThirdAddMode === 'defense' ? 4 : 3;
+      return Math.min(params.maxAdds, brakeCap);
+    },
+
+    getStepDrop(params, nextStepIndex) {
+      if (nextStepIndex === 4 && params.postThirdAddMode === 'defense') {
+        return 0.025; // Savunma eklemesi: -%2.5 düşüşte
+      }
+      return params.stepDropPct / 100;
+    },
+
     getStepMargin(params, stepIndex, currentTotalMargin = 0) {
       if (stepIndex === 0) return params.baseMargin;
+      if (stepIndex === 4 && params.postThirdAddMode === 'defense') {
+        // Son 1 Savunma Eklemesi: 3. ekleme toplam teminatı kadar (+$13.50)
+        return currentTotalMargin;
+      }
       if (params.dcaMode === 'linear') {
         return params.baseMargin + stepIndex * params.linearStep;
       }
@@ -533,7 +549,7 @@
           text: showLabels ? `#${t.id} AL $${t.totalMargin.toFixed(2)}${addSuffix}` : '',
         });
 
-        if (t.trendConfirmed && t.trendConfirmTime) {
+        if (t.addCount === 0 && t.trendConfirmed && t.trendConfirmTime) {
           markers.push({
             time: t.trendConfirmTime,
             position: 'aboveBar',
@@ -543,7 +559,15 @@
           });
         }
 
-        if (t.status === 'CLOSED' && t.exitTime) {
+        if (t.status === 'STOP_LOSS' && t.exitTime) {
+          markers.push({
+            time: t.exitTime,
+            position: 'aboveBar',
+            color: '#FF5252',
+            shape: 'arrowDown',
+            text: showLabels ? `#${t.id} SL ${fmtSignedUsd(t.netPnl)}` : 'SL',
+          });
+        } else if (t.status === 'CLOSED' && t.exitTime) {
           markers.push({
             time: t.exitTime,
             position: 'aboveBar',
@@ -568,9 +592,12 @@
     run(candles, params) {
       const ema = this.calculateEMA(candles, params.emaPeriod);
       const feeRate = params.feeRatePct / 100;
-      const stepDrop = params.stepDropPct / 100;
       const trendConfirmPct = params.trendConfirmPct ?? 1.0;
       const trendConfirmFactor = 1 + trendConfirmPct / 100;
+      const recoveryTpPct = params.recoveryTpPct ?? 0.40;
+      const recoveryTpFactor = 1 + recoveryTpPct / 100;
+      const maxTradeLossUsd = params.maxTradeLossUsd ?? 35;
+      const effectiveMaxAdds = this.getEffectiveMaxAdds(params);
       const leverage = params.leverage;
 
       let walletBalance = params.initialBalance;
@@ -589,23 +616,38 @@
       const emaSeries = [];
       const avgEntrySeries = [];
       const nextAddSeries = [];
+      const recoveryTpSeries = [];
+      const shieldSlSeries = [];
       const equitySeries = [];
 
-      const closePositionAtEma = (c, exitPrice, exitReason) => {
+      const getRecoveryTarget = (p, emaVal) => {
+        const tpPrice = p.avgEntryPrice * recoveryTpFactor;
+        if (emaVal !== null && emaVal > p.avgEntryPrice) {
+          return Math.min(emaVal, tpPrice);
+        }
+        return tpPrice;
+      };
+
+      const getShieldSlPrice = (p) => {
+        if (maxTradeLossUsd <= 0 || p.qty <= 0) return 0;
+        return Math.max(0, p.avgEntryPrice - maxTradeLossUsd / p.qty);
+      };
+
+      const closePosition = (c, exitPrice, status, exitReason, emaVal) => {
         const grossPnl = pos.qty * (exitPrice - pos.avgEntryPrice);
         const exitNotional = pos.qty * exitPrice;
         const exitFee = exitNotional * feeRate;
 
         pos.fees += exitFee;
         totalFeesPaid += exitFee;
-        walletBalance += grossPnl - exitFee;
+        walletBalance = Math.max(0, walletBalance + grossPnl - exitFee);
 
         const netPnl = walletBalance - pos.preTradeBalance;
         const netPnlPct = pos.totalMargin > 0 ? (netPnl / pos.totalMargin) * 100 : 0;
 
         trades.push({
           id: pos.id,
-          status: 'CLOSED',
+          status,
           exitReason,
           trendConfirmed: pos.trendConfirmed,
           trendConfirmTime: pos.trendConfirmTime,
@@ -626,6 +668,13 @@
 
         avgEntrySeries.push({ time: c.time, value: pos.avgEntryPrice });
         nextAddSeries.push({ time: c.time });
+        if (pos.addCount >= 3) {
+          recoveryTpSeries.push({ time: c.time, value: getRecoveryTarget(pos, emaVal) });
+          shieldSlSeries.push(maxTradeLossUsd > 0 ? { time: c.time, value: getShieldSlPrice(pos) } : { time: c.time });
+        } else {
+          recoveryTpSeries.push({ time: c.time });
+          shieldSlSeries.push({ time: c.time });
+        }
         pos = null;
 
         if (walletBalance > peakEquity) peakEquity = walletBalance;
@@ -645,14 +694,16 @@
         if (liquidatedEvent) {
           avgEntrySeries.push({ time: c.time });
           nextAddSeries.push({ time: c.time });
+          recoveryTpSeries.push({ time: c.time });
+          shieldSlSeries.push({ time: c.time });
           equitySeries.push({ time: c.time, value: 0 });
           continue;
         }
 
-        // 1) AÇIK POZİSYON VARSA: ÇİFT MODLU ÇIKIŞ + EKLEME + LİKİDASYON
+        // 1) AÇIK POZİSYON VARSA
         if (pos) {
-          // Durum A (Eklemesiz Trend Takibi): Trend onayı daha önceki mumda alındıysa
-          // fiyat tekrar EMA çizgisine geri çarptığında (low <= ema) pozisyonu EMA'dan kapat.
+          // MOD A (eklemeSayisi === 0): Trend onayı daha önceki mumda alındıysa
+          // fiyat tekrar EMA çizgisine geri çarptığında (low <= ema) EMA'dan kapat.
           if (
             pos.addCount === 0 &&
             pos.trendConfirmed &&
@@ -660,14 +711,15 @@
             c.low <= emaVal &&
             (!params.onlyExitAboveAvg || emaVal > pos.avgEntryPrice)
           ) {
-            closePositionAtEma(c, emaVal, 'TREND_EMA');
+            closePosition(c, emaVal, 'CLOSED', 'EMA50_TREND', emaVal);
             continue;
           }
 
-          // 1a) Ekleme tetikleme kontrolü (mum içinde low <= nextAddPrice)
-          // Not: Durum A'da trend onayı alınmadan fiyat -%1.5 düşerse ekleme yapılır ve Durum B'ye geçilir.
-          while (pos.addCount < params.maxAdds && c.low <= pos.nextAddPrice) {
-            const nextMargin = this.getStepMargin(params, pos.addCount + 1, pos.totalMargin);
+          // 1a) Ekleme tetikleme kontrolü (Ekleme Freni ile effectiveMaxAdds sınırı)
+          let addedOnThisCandle = false;
+          while (pos.addCount < effectiveMaxAdds && c.low <= pos.nextAddPrice) {
+            const nextStep = pos.addCount + 1;
+            const nextMargin = this.getStepMargin(params, nextStep, pos.totalMargin);
             const nextNotional = nextMargin * leverage;
             const addFee = nextNotional * feeRate;
             const freeBalance = walletBalance - pos.totalMargin;
@@ -691,7 +743,15 @@
             pos.lastEntryPrice = fillPrice;
             pos.addCount += 1;
             totalAddsCount += 1;
-            pos.nextAddPrice = pos.lastEntryPrice * (1 - stepDrop);
+            addedOnThisCandle = true;
+
+            // MOD B'ye geçiş: En az 1 ekleme yapıldığında trend onay bayrağını tamamen sıfırla
+            pos.trendConfirmed = false;
+            pos.trendConfirmTime = null;
+            pos.trendConfirmPrice = null;
+
+            const followingDrop = this.getStepDrop(params, pos.addCount + 1);
+            pos.nextAddPrice = pos.lastEntryPrice * (1 - followingDrop);
             pos.adds.push({
               step: pos.addCount,
               time: c.time,
@@ -705,7 +765,7 @@
             }
           }
 
-          // 1b) Çapraz Kasa Likidasyon Kontrolü (mumun en düşük noktasında)
+          // 1b) Drawdown takibi (mumun en düşük noktasında)
           const worstUnrealized = pos.qty * (c.low - pos.avgEntryPrice);
           const worstEquity = walletBalance + worstUnrealized;
 
@@ -721,6 +781,16 @@
             minEquity = Math.max(0, worstEquity);
           }
 
+          // 1c) Kasa Kalkanı Sert Zarar Kes (3. Ekleme Sonrası Max Stop-Loss)
+          if (pos.addCount >= 3 && maxTradeLossUsd > 0) {
+            const slPrice = getShieldSlPrice(pos);
+            if (c.low <= slPrice) {
+              closePosition(c, slPrice, 'STOP_LOSS', 'SHIELD_SL', emaVal);
+              continue;
+            }
+          }
+
+          // 1d) Çapraz Kasa Likidasyon Kontrolü
           if (params.crossLiquidation && worstEquity <= 0) {
             const liqPrice = Math.max(0, pos.avgEntryPrice - walletBalance / pos.qty);
             const netPnl = -pos.preTradeBalance;
@@ -753,6 +823,8 @@
 
             avgEntrySeries.push({ time: c.time, value: closedTrade.avgEntryPrice });
             nextAddSeries.push({ time: c.time });
+            recoveryTpSeries.push({ time: c.time });
+            shieldSlSeries.push({ time: c.time });
             equitySeries.push({ time: c.time, value: 0 });
             maxDrawdownPct = 100;
             maxDrawdownUsd = peakEquity;
@@ -760,33 +832,51 @@
             continue;
           }
 
-          // 1c) Çift Modlu Çıkış / Trend Onayı Kontrolü
+          // 1e) Kesin Ayrılmış Mod A / Mod B / 3+ Ekleme Kurtarma TP Çıkış Kontrolü
+          // Not: Aynı mumda ekleme tetiklendiyse düşüş öncesi high yerine kapanış fiyatı (c.close) baz alınır.
+          const exitCheckHigh = addedOnThisCandle ? c.close : c.high;
+
           if (pos.addCount === 0) {
-            // Durum A: Hiç ekleme yapılmadı -> EMA temasında SATMA, EMA * (1 + trendConfirm%) üstüne çıkınca trendi onayla
+            // MOD A: Hiç ekleme yoksa EMA temasında SATMA, EMA * (1 + trendConfirm%) üstüne çıkınca onayla
             if (!pos.trendConfirmed && emaVal !== null && c.high >= emaVal * trendConfirmFactor) {
               pos.trendConfirmed = true;
               pos.trendConfirmTime = c.time;
               pos.trendConfirmPrice = emaVal * trendConfirmFactor;
             }
-          } else {
-            // Durum B: En az 1 ekleme yapıldı -> Maliyet kurtarma modu, EMA'ya değdiği anda doğrudan kapat
+          } else if (pos.addCount === 1 || pos.addCount === 2) {
+            // MOD B (1-2 Ekleme): +%1 kuralı devre dışı, EMA 50 temasında doğrudan kapat
             const canExit =
               emaVal !== null &&
-              c.high >= emaVal &&
+              exitCheckHigh >= emaVal &&
               (!params.onlyExitAboveAvg || emaVal > pos.avgEntryPrice);
 
             if (canExit) {
-              closePositionAtEma(c, emaVal, 'DCA_EMA');
+              closePosition(c, emaVal, 'CLOSED', 'EMA50_RECOVERY', emaVal);
+              continue;
+            }
+          } else {
+            // 3+ EKLEME KURTARMA TP: Math.min(ema50, avgEntry * (1 + recoveryTp%)) (EMA ort. giriş altındaysa avgEntry * (1 + recoveryTp%))
+            const recoveryTarget = getRecoveryTarget(pos, emaVal);
+            if (exitCheckHigh >= recoveryTarget) {
+              closePosition(c, recoveryTarget, 'CLOSED', 'RECOVERY_TP', emaVal);
               continue;
             }
           }
 
-          // Pozisyon hala açık: çizgileri ve anlık özsermayeyi kaydet
+          // Pozisyon hala açık: grafik çizgilerini ve anlık özsermayeyi kaydet
           avgEntrySeries.push({ time: c.time, value: pos.avgEntryPrice });
-          if (pos.addCount < params.maxAdds) {
+          if (pos.addCount < effectiveMaxAdds) {
             nextAddSeries.push({ time: c.time, value: pos.nextAddPrice });
           } else {
             nextAddSeries.push({ time: c.time });
+          }
+
+          if (pos.addCount >= 3) {
+            recoveryTpSeries.push({ time: c.time, value: getRecoveryTarget(pos, emaVal) });
+            shieldSlSeries.push(maxTradeLossUsd > 0 ? { time: c.time, value: getShieldSlPrice(pos) } : { time: c.time });
+          } else {
+            recoveryTpSeries.push({ time: c.time });
+            shieldSlSeries.push({ time: c.time });
           }
 
           const markEquity = Math.max(0, walletBalance + pos.qty * (c.close - pos.avgEntryPrice));
@@ -823,7 +913,7 @@
               fees: fee0,
               addCount: 0,
               adds: [],
-              nextAddPrice: entryPrice * (1 - stepDrop),
+              nextAddPrice: entryPrice * (1 - this.getStepDrop(params, 1)),
               preTradeBalance,
               trendConfirmed: false,
               trendConfirmTime: null,
@@ -835,11 +925,13 @@
             }
 
             avgEntrySeries.push({ time: c.time, value: pos.avgEntryPrice });
-            if (params.maxAdds > 0) {
+            if (effectiveMaxAdds > 0) {
               nextAddSeries.push({ time: c.time, value: pos.nextAddPrice });
             } else {
               nextAddSeries.push({ time: c.time });
             }
+            recoveryTpSeries.push({ time: c.time });
+            shieldSlSeries.push({ time: c.time });
             equitySeries.push({ time: c.time, value: walletBalance });
             continue;
           }
@@ -848,6 +940,8 @@
         // Pozisyon yok
         avgEntrySeries.push({ time: c.time });
         nextAddSeries.push({ time: c.time });
+        recoveryTpSeries.push({ time: c.time });
+        shieldSlSeries.push({ time: c.time });
         equitySeries.push({ time: c.time, value: walletBalance });
       }
 
@@ -881,11 +975,13 @@
         });
       }
 
-      // Varsayılan sadeleştirilmiş (metinsiz) işaretçiler
+      // Varsayılan sadeleştirilmiş işaretçiler
       const markers = this.buildMarkers(trades, false, trendConfirmPct);
 
       // KPI Hesaplamaları
-      const closedTrades = trades.filter((t) => t.status === 'CLOSED' || t.status === 'LIQUIDATED');
+      const closedTrades = trades.filter(
+        (t) => t.status === 'CLOSED' || t.status === 'STOP_LOSS' || t.status === 'LIQUIDATED'
+      );
       const wins = closedTrades.filter((t) => t.netPnl > 0).length;
       const losses = closedTrades.length - wins;
       const winRate = closedTrades.length > 0 ? (wins / closedTrades.length) * 100 : 0;
@@ -898,9 +994,13 @@
         trades,
         markers,
         trendConfirmPct,
+        recoveryTpPct,
+        maxTradeLossUsd,
         emaSeries,
         avgEntrySeries,
         nextAddSeries,
+        recoveryTpSeries,
+        shieldSlSeries,
         equitySeries,
         liquidatedEvent,
         stats: {
@@ -929,8 +1029,8 @@
     computeLadder(params, refPrice) {
       const rows = [];
       const feeRate = params.feeRatePct / 100;
-      const stepDrop = params.stepDropPct / 100;
       const leverage = params.leverage;
+      const effectiveMaxAdds = this.getEffectiveMaxAdds(params);
 
       let currentPrice = refPrice > 0 ? refPrice : 65000;
       let cumMargin = 0;
@@ -938,9 +1038,9 @@
       let cumQty = 0;
       let cumFees = 0;
 
-      for (let step = 0; step <= params.maxAdds; step++) {
+      for (let step = 0; step <= effectiveMaxAdds; step++) {
         if (step > 0) {
-          currentPrice = currentPrice * (1 - stepDrop);
+          currentPrice = currentPrice * (1 - this.getStepDrop(params, step));
         }
         const dropFromStartPct = ((currentPrice - refPrice) / refPrice) * 100;
         const stepMargin = this.getStepMargin(params, step, cumMargin);
@@ -959,6 +1059,7 @@
         const availableWallet = Math.max(0, params.initialBalance - cumFees);
         const liqPrice = Math.max(0, avgEntry - availableWallet / cumQty);
 
+        const isDefenseStep = step === 4 && params.postThirdAddMode === 'defense';
         let status = 'SAFE';
         let statusLabel = 'Güvenli';
         if (freeBalance < 0) {
@@ -967,6 +1068,12 @@
         } else if (liqPrice >= currentPrice) {
           status = 'LIQ';
           statusLabel = 'Likidasyon Riski';
+        } else if (step === 3 && params.postThirdAddMode === 'stop') {
+          status = 'WARN';
+          statusLabel = 'Kalkan Aktif (Fren)';
+        } else if (isDefenseStep) {
+          status = 'WARN';
+          statusLabel = 'Son Savunma (-%2.5)';
         } else if (cumMargin / params.initialBalance > 0.5) {
           status = 'WARN';
           statusLabel = 'Yüksek Teminat';
@@ -974,7 +1081,7 @@
 
         rows.push({
           step,
-          label: step === 0 ? 'İlk Alım' : `+${step}. Ekleme`,
+          label: step === 0 ? 'İlk Alım' : isDefenseStep ? '+4. Savunma' : `+${step}. Ekleme`,
           dropFromStartPct,
           entryPrice: currentPrice,
           stepMargin,
@@ -999,6 +1106,8 @@
     emaSeries: null,
     avgSeries: null,
     nextAddSeries: null,
+    recoveryTpSeries: null,
+    shieldSlSeries: null,
 
     equityChart: null,
     equitySeries: null,
@@ -1023,12 +1132,18 @@
     findTradeEventAtTime(timeSec) {
       if (!this.lastResult || !this.lastResult.trades.length) return null;
       const trades = this.lastResult.trades;
-      // 1) Öncelikli: tam olay mumları (Giriş, Trend Onayı, Ekleme, Çıkış/Likidasyon)
+      // 1) Öncelikli: tam olay mumları (Giriş, Trend Onayı, Ekleme, Çıkış/SL/Likidasyon)
       for (const t of trades) {
         if (t.exitTime === timeSec) {
-          return { trade: t, eventType: t.status === 'LIQUIDATED' ? 'LIQUIDATED' : 'EXIT' };
+          const ev =
+            t.status === 'LIQUIDATED'
+              ? 'LIQUIDATED'
+              : t.status === 'STOP_LOSS'
+                ? 'STOP_LOSS'
+                : 'EXIT';
+          return { trade: t, eventType: ev };
         }
-        if (t.trendConfirmed && t.trendConfirmTime === timeSec) {
+        if (t.addCount === 0 && t.trendConfirmed && t.trendConfirmTime === timeSec) {
           return { trade: t, eventType: 'TREND_CONFIRM' };
         }
         if (t.entryTime === timeSec) {
@@ -1063,6 +1178,7 @@
 
       const { trade: t, eventType } = match;
       const trendPct = this.lastResult?.trendConfirmPct ?? 1.0;
+      const tpPct = this.lastResult?.recoveryTpPct ?? 0.40;
       let badgeHtml = '';
       if (eventType === 'ENTRY') {
         badgeHtml = '<span class="hover-badge hover-badge-al">AL</span>';
@@ -1070,14 +1186,22 @@
         badgeHtml = `<span class="hover-badge hover-badge-trend">◆ +${trendPct}% TREND ONAYI</span>`;
       } else if (eventType === 'ADD') {
         badgeHtml = '<span class="hover-badge hover-badge-al">EKLEME</span>';
+      } else if (eventType === 'STOP_LOSS') {
+        badgeHtml = '<span class="hover-badge hover-badge-loss">KASA KALKANI SL</span>';
       } else if (eventType === 'EXIT') {
-        badgeHtml = `<span class="hover-badge ${t.netPnl >= 0 ? 'hover-badge-sat' : 'hover-badge-loss'}">SAT</span>`;
+        if (t.exitReason === 'RECOVERY_TP') {
+          badgeHtml = `<span class="hover-badge hover-badge-trend">ERKEN KÂR (+%${Number(tpPct.toFixed(2))})</span>`;
+        } else {
+          badgeHtml = `<span class="hover-badge ${t.netPnl >= 0 ? 'hover-badge-sat' : 'hover-badge-loss'}">SAT</span>`;
+        }
       } else if (eventType === 'LIQUIDATED') {
         badgeHtml = '<span class="hover-badge hover-badge-loss">LİKİDE</span>';
       } else {
-        badgeHtml = t.trendConfirmed
-          ? '<span class="hover-badge hover-badge-trend">TREND TAKİBİ</span>'
-          : '<span class="hover-badge hover-badge-al">AÇIK İŞLEM</span>';
+        badgeHtml = t.addCount >= 3
+          ? '<span class="hover-badge hover-badge-trend">KALKAN AKTİF</span>'
+          : t.trendConfirmed
+            ? '<span class="hover-badge hover-badge-trend">TREND TAKİBİ</span>'
+            : '<span class="hover-badge hover-badge-al">AÇIK İŞLEM</span>';
       }
 
       const pnlClass = t.netPnl > 0 ? 'positive' : t.netPnl < 0 ? 'negative' : '';
@@ -1171,12 +1295,34 @@
         title: 'Sonraki Ekleme',
       });
 
+      this.recoveryTpSeries = this.mainChart.addLineSeries({
+        color: '#00E5FF',
+        lineWidth: 1,
+        lineStyle: LWC.LineStyle.Dashed,
+        priceLineVisible: false,
+        lastValueVisible: false,
+        crosshairMarkerVisible: true,
+        title: 'Kurtarma TP',
+      });
+
+      this.shieldSlSeries = this.mainChart.addLineSeries({
+        color: '#FF5252',
+        lineWidth: 1,
+        lineStyle: LWC.LineStyle.Dashed,
+        priceLineVisible: false,
+        lastValueVisible: false,
+        crosshairMarkerVisible: true,
+        title: 'Kasa Kalkanı SL',
+      });
+
       // Crosshair Legend & Sol Üst İşlem Bilgi Barı senkronizasyonu
       this.mainChart.subscribeCrosshairMove((param) => {
         const ohlcEl = document.getElementById('legendOhlc');
         const emaEl = document.getElementById('legendEmaVal');
         const avgEl = document.getElementById('legendAvgVal');
         const nextEl = document.getElementById('legendNextVal');
+        const tpEl = document.getElementById('legendRecoveryTpVal');
+        const slEl = document.getElementById('legendShieldSlVal');
         if (!param || !param.time) {
           this.updateHoverTradeBar(null);
           return;
@@ -1186,6 +1332,8 @@
         const eData = param.seriesData.get(this.emaSeries);
         const aData = param.seriesData.get(this.avgSeries);
         const nData = param.seriesData.get(this.nextAddSeries);
+        const tpData = param.seriesData.get(this.recoveryTpSeries);
+        const slData = param.seriesData.get(this.shieldSlSeries);
 
         if (cData && ohlcEl) {
           ohlcEl.textContent = `O: ${fmtPrice(cData.open)}  H: ${fmtPrice(cData.high)}  L: ${fmtPrice(cData.low)}  C: ${fmtPrice(cData.close)}`;
@@ -1193,6 +1341,8 @@
         if (emaEl) emaEl.textContent = eData && eData.value !== undefined ? fmtPrice(eData.value) : '—';
         if (avgEl) avgEl.textContent = aData && aData.value !== undefined ? fmtPrice(aData.value) : '—';
         if (nextEl) nextEl.textContent = nData && nData.value !== undefined ? fmtPrice(nData.value) : '—';
+        if (tpEl) tpEl.textContent = tpData && tpData.value !== undefined ? fmtPrice(tpData.value) : '—';
+        if (slEl) slEl.textContent = slData && slData.value !== undefined ? fmtPrice(slData.value) : '—';
 
         this.updateHoverTradeBar(param.time);
       });
@@ -1296,11 +1446,15 @@
       this.emaSeries.applyOptions({ title: `EMA ${params.emaPeriod}`, priceFormat: { type: 'price', precision, minMove } });
       this.avgSeries.applyOptions({ priceFormat: { type: 'price', precision, minMove } });
       this.nextAddSeries.applyOptions({ priceFormat: { type: 'price', precision, minMove } });
+      this.recoveryTpSeries.applyOptions({ priceFormat: { type: 'price', precision, minMove } });
+      this.shieldSlSeries.applyOptions({ priceFormat: { type: 'price', precision, minMove } });
 
       this.candleSeries.setData(candles);
       this.emaSeries.setData(result.emaSeries);
       this.avgSeries.setData(result.avgEntrySeries);
       this.nextAddSeries.setData(result.nextAddSeries);
+      this.recoveryTpSeries.setData(result.recoveryTpSeries);
+      this.shieldSlSeries.setData(result.shieldSlSeries);
       this.candleSeries.setMarkers(
         BacktestEngine.buildMarkers(result.trades, this.showMarkerLabels, result.trendConfirmPct ?? 1.0)
       );
@@ -1447,6 +1601,7 @@
         'initialBalanceInput', 'baseMarginInput', 'leverageInput', 'feeRateInput',
         'emaPeriodInput', 'stepDropInput', 'dcaModeSelect', 'multiplierGroup', 'multiplierInput',
         'linearStepGroup', 'linearStepInput', 'maxAddsInput', 'trendConfirmInput',
+        'recoveryTpInput', 'maxTradeLossInput', 'postThirdAddSelect',
         'toggleExitAboveAvg', 'toggleCrossLiq',
         'fetchProgressWrap', 'fetchProgressText', 'fetchProgressPct', 'fetchProgressFill',
         'btnRunSimulation', 'fileUploadInput', 'btnExportCsv',
@@ -1515,6 +1670,9 @@
         linearStep: Math.max(0.01, parseFloat(this.el.linearStepInput.value) || 0.5),
         maxAdds: Math.min(20, Math.max(0, parseInt(this.el.maxAddsInput.value, 10) || 7)),
         trendConfirmPct: Math.max(0.1, parseFloat(this.el.trendConfirmInput.value) || 1.0),
+        recoveryTpPct: Math.max(0.05, parseFloat(this.el.recoveryTpInput.value) || 0.40),
+        maxTradeLossUsd: Math.max(1, parseFloat(this.el.maxTradeLossInput.value) || 35),
+        postThirdAddMode: this.el.postThirdAddSelect.value || 'stop',
         onlyExitAboveAvg: this.el.toggleExitAboveAvg.checked,
         crossLiquidation: this.el.toggleCrossLiq.checked,
       };
@@ -1538,6 +1696,9 @@
           linearStepInput: this.el.linearStepInput.value,
           maxAddsInput: this.el.maxAddsInput.value,
           trendConfirmInput: this.el.trendConfirmInput.value,
+          recoveryTpInput: this.el.recoveryTpInput.value,
+          maxTradeLossInput: this.el.maxTradeLossInput.value,
+          postThirdAddSelect: this.el.postThirdAddSelect.value,
           toggleExitAboveAvg: this.el.toggleExitAboveAvg.checked,
           toggleCrossLiq: this.el.toggleCrossLiq.checked,
         };
@@ -1587,6 +1748,11 @@
         this.renderLadderTable();
       });
 
+      this.el.postThirdAddSelect.addEventListener('change', () => {
+        this.saveSettings();
+        this.renderLadderTable();
+      });
+
       // Strateji girdileri değiştikçe Kademe & Likidasyon tablosunu anlık güncelle
       const liveInputs = [
         'initialBalanceInput', 'baseMarginInput', 'leverageInput', 'feeRateInput',
@@ -1600,7 +1766,10 @@
         });
       }
 
-      ['timeframeSelect', 'customSymbolInput', 'trendConfirmInput', 'toggleExitAboveAvg', 'toggleCrossLiq'].forEach((id) => {
+      [
+        'timeframeSelect', 'customSymbolInput', 'trendConfirmInput',
+        'recoveryTpInput', 'maxTradeLossInput', 'toggleExitAboveAvg', 'toggleCrossLiq',
+      ].forEach((id) => {
         this.el[id].addEventListener('change', () => {
           this.saveSettings();
           if (id === 'timeframeSelect' || id === 'customSymbolInput') {
@@ -1825,27 +1994,46 @@
       this.el.eqRoiVal.className = `mono ${s.roiPct >= 0 ? 'positive' : 'negative'}`;
     },
 
+    getExitReasonMeta(t, params) {
+      const trendPct = Number((params.trendConfirmPct ?? 1.0).toFixed(2));
+      const tpPct = Number((params.recoveryTpPct ?? 0.4).toFixed(2));
+      const emaP = params.emaPeriod ?? 50;
+
+      if (t.status === 'LIQUIDATED' || t.exitReason === 'LIQUIDATED') {
+        return { label: 'LİKİDE', cls: 'tag-liq' };
+      }
+      if (t.status === 'STOP_LOSS' || t.exitReason === 'SHIELD_SL') {
+        return { label: 'Kasa Kalkanı SL', cls: 'tag-liq' };
+      }
+      if (t.status === 'OPEN' || t.exitReason === 'OPEN') {
+        return { label: 'AÇIK', cls: 'tag-open' };
+      }
+      if (t.exitReason === 'RECOVERY_TP') {
+        return { label: `Erken Kâr (+%${tpPct})`, cls: 'tag-tp' };
+      }
+      if (t.exitReason === 'EMA50_TREND') {
+        return { label: `EMA${emaP} Trend (+%${trendPct})`, cls: 'tag-trend' };
+      }
+      return { label: `EMA${emaP} Kurtarma`, cls: 'tag-safe' };
+    },
+
     renderTradesTable(trades, params) {
       const tbody = this.el.tradesTableBody;
       this.el.tabTradesCount.textContent = String(trades.length);
 
       if (!trades.length) {
-        tbody.innerHTML = `<tr class="empty-row"><td colspan="10">Seçilen tarih aralığı ve parametrelerle hiç işlem tetiklenmedi.</td></tr>`;
+        tbody.innerHTML = `<tr class="empty-row"><td colspan="11">Seçilen tarih aralığı ve parametrelerle hiç işlem tetiklenmedi.</td></tr>`;
         return;
       }
 
       const frag = document.createDocumentFragment();
       for (const t of trades) {
         const tr = document.createElement('tr');
-        tr.className = 'clickable' + (t.status === 'LIQUIDATED' ? ' liq-row' : '');
+        tr.className = 'clickable' + (t.status === 'LIQUIDATED' || t.status === 'STOP_LOSS' ? ' liq-row' : '');
         tr.dataset.tradeId = String(t.id);
 
-        const statusBadge =
-          t.status === 'LIQUIDATED'
-            ? '<span class="status-tag tag-liq">LİKİDE</span>'
-            : t.status === 'OPEN'
-              ? '<span class="status-tag tag-open">AÇIK</span>'
-              : '';
+        const reason = this.getExitReasonMeta(t, params);
+        const reasonBadge = `<span class="status-tag ${reason.cls}">${reason.label}</span>`;
 
         const addTag =
           t.addCount > 0
@@ -1855,7 +2043,8 @@
         const pnlClass = t.netPnl > 0 ? 'positive' : t.netPnl < 0 ? 'negative' : '';
 
         tr.innerHTML = `
-          <td class="mono"><span class="trade-id-badge">#${t.id} ${statusBadge}</span></td>
+          <td class="mono"><span class="trade-id-badge">#${t.id}</span></td>
+          <td>${reasonBadge}</td>
           <td class="mono">${fmtDateTime(t.entryTime)}</td>
           <td class="mono">${t.exitTime ? fmtDateTime(t.exitTime) : '<span class="warning-text">Açık Pozisyon</span>'}</td>
           <td class="num mono">${fmtPrice(t.initialEntryPrice)}</td>
@@ -1873,7 +2062,7 @@
           this.state.selectedTradeId = t.id;
 
           this.el.selectedTradePill.textContent =
-            `#${t.id} | +${t.addCount} Ekleme | Ort: ${fmtPrice(t.avgEntryPrice)} | ${fmtSignedUsd(t.netPnl)}`;
+            `#${t.id} | ${reason.label} | +${t.addCount} Ekleme | ${fmtSignedUsd(t.netPnl)}`;
           this.el.selectedTradePill.classList.remove('hidden');
 
           ChartManager.focusTrade(t, params.timeframe);
@@ -1933,18 +2122,19 @@
       }
       const params = this.getParams();
       const headers = [
-        'Islem_No', 'Durum', 'Giris_Zamani', 'Cikis_Zamani',
+        'Islem_No', 'Cikis_Sebebi', 'Giris_Zamani', 'Cikis_Zamani',
         'Ilk_Alim_Fiyati', 'Ekleme_Sayisi', 'Ort_Giris_Fiyati',
         'Toplam_Teminat_USD', `Toplam_Hacim_${params.leverage}x_USD`,
-        `EMA_${params.emaPeriod}_Cikis`, 'Komisyon_USD',
+        'Cikis_Fiyati', 'Komisyon_USD',
         'Net_KZ_USD', 'Net_KZ_Yuzde', 'Islem_Sonu_Kasa_USD',
       ];
 
       const lines = [headers.join(',')];
       for (const t of res.trades) {
+        const reason = this.getExitReasonMeta(t, params);
         lines.push([
           `#${t.id}`,
-          t.status,
+          `"${reason.label}"`,
           `"${fmtDateTime(t.entryTime)}"`,
           `"${t.exitTime ? fmtDateTime(t.exitTime) : 'ACIK'}"`,
           t.initialEntryPrice.toFixed(6),
