@@ -1,0 +1,408 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Futures DCA / Martingale Backtest Terminali</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet" />
+  <script src="https://unpkg.com/lightweight-charts@4.2.1/dist/lightweight-charts.standalone.production.js"></script>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <div class="terminal-shell">
+    <!-- ==================== SOL PANEL (340px SABİT) ==================== -->
+    <aside class="sidebar" aria-label="Strateji ve Veri Kontrolleri">
+      <header class="sidebar-header">
+        <div class="brand-row">
+          <div class="brand-mark" aria-hidden="true">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none">
+              <path d="M3 17L9 11L13 15L21 7" stroke="#00E676" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/>
+              <path d="M15 7H21V13" stroke="#00E676" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/>
+            </svg>
+          </div>
+          <div class="brand-text">
+            <h1>FUTURES DCA TERMINAL</h1>
+            <span class="brand-sub">Martingale Backtest &amp; Simülasyon</span>
+          </div>
+        </div>
+        <div class="status-pills">
+          <span id="networkStatusBadge" class="pill pill-online">● Çevrimiçi</span>
+          <span id="cacheCountBadge" class="pill pill-cache" title="IndexedDB çevrimdışı önbellek">Önbellek: 0</span>
+        </div>
+      </header>
+
+      <div class="sidebar-scroll">
+        <!-- BÖLÜM 1: VERİ MOTORU -->
+        <section class="panel-section">
+          <div class="section-title">
+            <span>1. Piyasa &amp; Veri Kaynağı</span>
+            <button id="btnClearCache" class="btn-link" type="button" title="IndexedDB önbelleğini temizle">Önbelleği Sil</button>
+          </div>
+
+          <div class="form-row-2">
+            <div class="form-group">
+              <label for="symbolSelect">Parite</label>
+              <select id="symbolSelect" class="input-control">
+                <option value="BTCUSDT" selected>BTCUSDT</option>
+                <option value="ETHUSDT">ETHUSDT</option>
+                <option value="SOLUSDT">SOLUSDT</option>
+                <option value="BNBUSDT">BNBUSDT</option>
+                <option value="CUSTOM">Özel Parite...</option>
+              </select>
+            </div>
+            <div class="form-group">
+              <label for="timeframeSelect">Zaman Dilimi</label>
+              <select id="timeframeSelect" class="input-control">
+                <option value="5m">5m</option>
+                <option value="15m" selected>15m</option>
+                <option value="30m">30m</option>
+                <option value="1h">1h</option>
+                <option value="4h">4h</option>
+              </select>
+            </div>
+          </div>
+
+          <div id="customSymbolWrap" class="form-group hidden">
+            <label for="customSymbolInput">Özel Parite Kodu (örn. XRPUSDT)</label>
+            <input id="customSymbolInput" type="text" class="input-control mono" placeholder="XRPUSDT" value="XRPUSDT" autocomplete="off" />
+          </div>
+
+          <div class="form-group">
+            <label for="datePresetSelect">Tarih Aralığı</label>
+            <select id="datePresetSelect" class="input-control">
+              <option value="7d">Son 7 Gün</option>
+              <option value="30d" selected>Son 1 Ay (30 Gün)</option>
+              <option value="90d">Son 3 Ay (90 Gün)</option>
+              <option value="custom">Başlangıç - Bitiş Tarihi</option>
+            </select>
+          </div>
+
+          <div id="customDateWrap" class="form-row-2 hidden">
+            <div class="form-group">
+              <label for="startDateInput">Başlangıç</label>
+              <input id="startDateInput" type="date" class="input-control mono" />
+            </div>
+            <div class="form-group">
+              <label for="endDateInput">Bitiş</label>
+              <input id="endDateInput" type="date" class="input-control mono" />
+            </div>
+          </div>
+
+          <div class="inline-check">
+            <input type="checkbox" id="forceRefreshCheck" />
+            <label for="forceRefreshCheck">Önbelleği atla, API'den taze veri çek</label>
+          </div>
+        </section>
+
+        <!-- BÖLÜM 2: KASA VE KALDIRAÇ -->
+        <section class="panel-section">
+          <div class="section-title">
+            <span>2. Kasa &amp; Kaldıraç Ayarları</span>
+          </div>
+
+          <div class="form-row-2">
+            <div class="form-group">
+              <label for="initialBalanceInput">Başlangıç Kasası ($)</label>
+              <input id="initialBalanceInput" type="number" step="10" min="1" value="200" class="input-control mono" />
+            </div>
+            <div class="form-group">
+              <label for="baseMarginInput">İlk Teminat ($)</label>
+              <input id="baseMarginInput" type="number" step="0.1" min="0.01" value="0.50" class="input-control mono" />
+            </div>
+          </div>
+
+          <div class="form-row-2">
+            <div class="form-group">
+              <label for="leverageInput">Kaldıraç (1x–100x)</label>
+              <input id="leverageInput" type="number" step="1" min="1" max="100" value="10" class="input-control mono" />
+            </div>
+            <div class="form-group">
+              <label for="feeRateInput">Komisyon (%)</label>
+              <input id="feeRateInput" type="number" step="0.01" min="0" max="1" value="0.05" class="input-control mono" />
+            </div>
+          </div>
+        </section>
+
+        <!-- BÖLÜM 3: DCA / MARTINGALE PARAMETRELERİ -->
+        <section class="panel-section">
+          <div class="section-title">
+            <span>3. Strateji &amp; Ekleme Kuralları</span>
+          </div>
+
+          <div class="form-row-2">
+            <div class="form-group">
+              <label for="emaPeriodInput">EMA Periyodu</label>
+              <input id="emaPeriodInput" type="number" step="1" min="2" max="500" value="50" class="input-control mono" />
+            </div>
+            <div class="form-group">
+              <label for="stepDropInput">Tetikleme Düşüşü (%)</label>
+              <input id="stepDropInput" type="number" step="0.1" min="0.1" max="50" value="1.5" class="input-control mono" />
+            </div>
+          </div>
+
+          <div class="form-group">
+            <label for="dcaModeSelect">Ekleme Artış Modu</label>
+            <select id="dcaModeSelect" class="input-control">
+              <option value="martingale" selected>Martingale Çarpanı (2.0x)</option>
+              <option value="linear">Lineer Artış (+$0.50)</option>
+            </select>
+          </div>
+
+          <div class="form-row-2">
+            <div class="form-group" id="multiplierGroup">
+              <label for="multiplierInput">Ekleme Çarpanı (x)</label>
+              <input id="multiplierInput" type="number" step="0.1" min="1" max="10" value="2.0" class="input-control mono" />
+            </div>
+            <div class="form-group hidden" id="linearStepGroup">
+              <label for="linearStepInput">Lineer Artış ($)</label>
+              <input id="linearStepInput" type="number" step="0.1" min="0.05" value="0.50" class="input-control mono" />
+            </div>
+            <div class="form-group">
+              <label for="maxAddsInput">Maks. Ekleme Sayısı</label>
+              <input id="maxAddsInput" type="number" step="1" min="0" max="20" value="7" class="input-control mono" />
+            </div>
+          </div>
+        </section>
+
+        <!-- BÖLÜM 4: KRİTİK KORUMA ANAHTARLARI -->
+        <section class="panel-section">
+          <div class="section-title">
+            <span>4. Kritik Risk Korumaları</span>
+          </div>
+
+          <label class="toggle-row" for="toggleExitAboveAvg">
+            <div class="toggle-info">
+              <span class="toggle-title">Sadece Ort. Giriş Üstünde Sat</span>
+              <span class="toggle-desc">EMA 50 ortalama maliyetin altına inerse zararına kapatmayı engeller.</span>
+            </div>
+            <div class="switch">
+              <input id="toggleExitAboveAvg" type="checkbox" checked />
+              <span class="slider"></span>
+            </div>
+          </label>
+
+          <label class="toggle-row" for="toggleCrossLiq">
+            <div class="toggle-info">
+              <span class="toggle-title">Çapraz Kasa Likidasyon Kontrolü</span>
+              <span class="toggle-desc">Anlık zarar tüm kasayı eritirse pozisyonu likide işaretler.</span>
+            </div>
+            <div class="switch">
+              <input id="toggleCrossLiq" type="checkbox" checked />
+              <span class="slider"></span>
+            </div>
+          </label>
+        </section>
+      </div>
+
+      <!-- SABİT ALT EYLEM BUTONLARI -->
+      <footer class="sidebar-footer">
+        <div id="fetchProgressWrap" class="progress-wrap hidden">
+          <div class="progress-top">
+            <span id="fetchProgressText">Veri çekiliyor...</span>
+            <span id="fetchProgressPct" class="mono">0%</span>
+          </div>
+          <div class="progress-bar">
+            <div id="fetchProgressFill" class="progress-fill" style="width: 0%"></div>
+          </div>
+        </div>
+
+        <button id="btnRunSimulation" class="btn btn-primary" type="button">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+            <path d="M8 5v14l11-7z"/>
+          </svg>
+          <span>Simülasyonu Çalıştır</span>
+        </button>
+
+        <div class="footer-btn-grid">
+          <label class="btn btn-secondary file-btn" for="fileUploadInput" title="Yerel CSV veya JSON mum verisi yükle">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+              <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+              <polyline points="17 8 12 3 7 8"/>
+              <line x1="12" y1="3" x2="12" y2="15"/>
+            </svg>
+            <span>CSV / JSON Yükle</span>
+            <input id="fileUploadInput" type="file" accept=".csv,.json,text/csv,application/json" hidden />
+          </label>
+
+          <button id="btnExportCsv" class="btn btn-secondary" type="button" title="Birleşik işlemler listesini CSV olarak indir">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+              <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+              <polyline points="7 10 12 15 17 10"/>
+              <line x1="12" y1="15" x2="12" y2="3"/>
+            </svg>
+            <span>CSV Dışa Aktar</span>
+          </button>
+        </div>
+      </footer>
+    </aside>
+
+    <!-- ==================== SAĞ ANA ALAN ==================== -->
+    <main class="main-area">
+      <!-- ÜST: 90px 6'LI PERFORMANS ÖZET KARTLARI (KPI) -->
+      <section class="kpi-grid" aria-label="Performans Özet Kartları">
+        <article class="kpi-card">
+          <div class="kpi-label">Güncel Kasa</div>
+          <div id="kpiBalance" class="kpi-value mono">$200.00</div>
+          <div id="kpiBalanceSub" class="kpi-sub mono">Başlangıç: $200.00</div>
+        </article>
+
+        <article class="kpi-card">
+          <div class="kpi-label">Net Kâr / Zarar ($)</div>
+          <div id="kpiNetPnl" class="kpi-value mono">$0.00</div>
+          <div id="kpiNetPnlSub" class="kpi-sub mono">Komisyon: $0.00</div>
+        </article>
+
+        <article class="kpi-card">
+          <div class="kpi-label">Kazanma Oranı (%)</div>
+          <div id="kpiWinRate" class="kpi-value mono">0.0%</div>
+          <div id="kpiWinRateSub" class="kpi-sub mono">0 Kâr / 0 Zarar</div>
+        </article>
+
+        <article class="kpi-card">
+          <div class="kpi-label">Toplam Birleşik İşlem</div>
+          <div id="kpiTotalTrades" class="kpi-value mono">0</div>
+          <div id="kpiTotalTradesSub" class="kpi-sub mono">Toplam Ekleme: 0</div>
+        </article>
+
+        <article class="kpi-card">
+          <div class="kpi-label">Maksimum Düşüş (DD)</div>
+          <div id="kpiMaxDd" class="kpi-value mono negative">0.00%</div>
+          <div id="kpiMaxDdSub" class="kpi-sub mono">-$0.00 tepe-dip</div>
+        </article>
+
+        <article class="kpi-card">
+          <div class="kpi-label">Tek İşlem Maks. Teminat</div>
+          <div id="kpiMaxMargin" class="kpi-value mono">$0.00</div>
+          <div id="kpiMaxMarginSub" class="kpi-sub mono">Kasa oranı: 0.0%</div>
+        </article>
+      </section>
+
+      <!-- ORTA: %52 İNTERAKTİF MUM GRAFİĞİ -->
+      <section class="chart-panel" aria-label="İnteraktif Mum Grafiği">
+        <div class="chart-toolbar">
+          <div class="chart-title-group">
+            <span id="chartSymbolLabel" class="chart-symbol mono">BTCUSDT</span>
+            <span id="chartTfLabel" class="chart-badge mono">15m</span>
+            <span id="chartSourceBadge" class="chart-badge source-badge">Hazır</span>
+            <span id="chartCandleCount" class="chart-meta mono">0 mum</span>
+          </div>
+
+          <div class="chart-legend" id="chartLegend">
+            <span class="legend-item mono" id="legendOhlc">O: — &nbsp; H: — &nbsp; L: — &nbsp; C: —</span>
+            <span class="legend-item"><i class="dot dot-ema"></i><span id="legendEmaLabel">EMA 50:</span> <b id="legendEmaVal" class="mono">—</b></span>
+            <span class="legend-item"><i class="dot dot-avg"></i>Ort. Giriş: <b id="legendAvgVal" class="mono">—</b></span>
+            <span class="legend-item"><i class="dot dot-add"></i>Sonraki Ekleme: <b id="legendNextVal" class="mono">—</b></span>
+          </div>
+
+          <div class="chart-actions">
+            <span id="selectedTradePill" class="selected-pill hidden"></span>
+            <button id="btnResetZoom" class="btn-chip" type="button" title="Tüm grafiğe dön">Tümünü Göster</button>
+          </div>
+        </div>
+
+        <div id="liquidationAlertBar" class="liq-alert hidden" role="alert">
+          <strong>⚠ LİKİDASYON TESPİT EDİLDİ:</strong> <span id="liqAlertText"></span>
+        </div>
+
+        <div id="mainChartContainer" class="chart-canvas-host"></div>
+      </section>
+
+      <!-- ALT: %36 SEKMELİ ALT PANEL -->
+      <section class="bottom-panel" aria-label="İşlem ve Analiz Sekmeleri">
+        <div class="tab-bar" role="tablist">
+          <div class="tab-buttons">
+            <button class="tab-btn active" data-tab="trades" role="tab" aria-selected="true" type="button">
+              1. Birleşik İşlemler Listesi <span id="tabTradesCount" class="tab-count mono">0</span>
+            </button>
+            <button class="tab-btn" data-tab="equity" role="tab" aria-selected="false" type="button">
+              2. Kasa Büyüme Eğrisi
+            </button>
+            <button class="tab-btn" data-tab="ladder" role="tab" aria-selected="false" type="button">
+              3. Kademe &amp; Likidasyon Tablosu
+            </button>
+          </div>
+
+          <div class="tab-tools">
+            <span class="tab-hint" id="tabHintText">Grafikte odaklanmak için herhangi bir işlem satırına tıklayın</span>
+          </div>
+        </div>
+
+        <!-- SEKME 1: BİRLEŞİK İŞLEMLER LİSTESİ -->
+        <div id="tab-trades" class="tab-content active" role="tabpanel">
+          <div class="table-wrap">
+            <table class="data-table" id="tradesTable">
+              <thead>
+                <tr>
+                  <th>İşlem No</th>
+                  <th>Giriş Zamanı</th>
+                  <th>Çıkış Zamanı</th>
+                  <th class="num">İlk Alım Fiyatı</th>
+                  <th class="num">Ekleme Sayısı (+X)</th>
+                  <th class="num">Ort. Giriş Fiyatı</th>
+                  <th class="num" id="thMarginVol">Toplam Teminat / Hacim (10x)</th>
+                  <th class="num" id="thEmaExit">EMA 50 Çıkış</th>
+                  <th class="num">Net K/Z ($ ve %)</th>
+                  <th class="num">İşlem Sonu Kasa</th>
+                </tr>
+              </thead>
+              <tbody id="tradesTableBody">
+                <tr class="empty-row">
+                  <td colspan="10">Simülasyonu çalıştırdığınızda birleşik işlem döngüleri burada listelenecektir.</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        <!-- SEKME 2: KASA BÜYÜME EĞRİSİ -->
+        <div id="tab-equity" class="tab-content" role="tabpanel">
+          <div class="equity-header-strip">
+            <div class="eq-stat">Başlangıç: <b id="eqStartVal" class="mono">$200.00</b></div>
+            <div class="eq-stat">Tepe Kasa: <b id="eqPeakVal" class="mono positive">$200.00</b></div>
+            <div class="eq-stat">En Düşük Kasa: <b id="eqLowVal" class="mono negative">$200.00</b></div>
+            <div class="eq-stat">Bitiş Kasası: <b id="eqEndVal" class="mono">$200.00</b></div>
+            <div class="eq-stat">Getiri (ROI): <b id="eqRoiVal" class="mono">0.00%</b></div>
+          </div>
+          <div id="equityChartContainer" class="equity-chart-host"></div>
+        </div>
+
+        <!-- SEKME 3: KADEME & LİKİDASYON TABLOSU -->
+        <div id="tab-ladder" class="tab-content" role="tabpanel">
+          <div class="ladder-toolbar">
+            <span class="ladder-info">Sol paneldeki parametrelerle anlık hesaplanır. Referans İlk Giriş Fiyatı:</span>
+            <input id="ladderRefPriceInput" type="number" step="any" min="0.0001" value="65000" class="input-control input-sm mono" />
+            <span id="ladderSummaryBadge" class="chart-badge mono">Maks. 8 Kademe</span>
+          </div>
+          <div class="table-wrap">
+            <table class="data-table" id="ladderTable">
+              <thead>
+                <tr>
+                  <th>Kademe</th>
+                  <th class="num">Düşüş (%)</th>
+                  <th class="num">Giriş Fiyatı</th>
+                  <th class="num">Kademe Teminat</th>
+                  <th class="num">Toplam Teminat</th>
+                  <th class="num">Toplam Hacim</th>
+                  <th class="num">Yeni Ort. Giriş</th>
+                  <th class="num">Kâra Geçiş (%)</th>
+                  <th class="num">Çapraz Likidasyon</th>
+                  <th class="num">Kalan Serbest Kasa</th>
+                  <th>Durum</th>
+                </tr>
+              </thead>
+              <tbody id="ladderTableBody"></tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <!-- TOAST BİLDİRİM ALANI -->
+  <div id="toastContainer" class="toast-container" aria-live="polite"></div>
+
+  <script src="app.js"></script>
+</body>
+</html>
